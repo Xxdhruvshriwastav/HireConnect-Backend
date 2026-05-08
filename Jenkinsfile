@@ -44,8 +44,6 @@ pipeline {
         // ── 2. Build + Test all services ────────────────────────────────────────
         stage('Build & Test Microservices') {
             matrix {
-                // failFast: false → a single service failure won't abort all other branches
-                failFast false
                 axes {
                     axis {
                         name    'SERVICE'
@@ -88,7 +86,6 @@ pipeline {
         // ── 3. Docker Build ──────────────────────────────────────────────────────
         stage('Docker Build All Images') {
             matrix {
-                failFast false
                 axes {
                     axis {
                         name    'SERVICE'
