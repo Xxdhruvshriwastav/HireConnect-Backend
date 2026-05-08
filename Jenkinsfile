@@ -61,8 +61,7 @@ pipeline {
                                'analytics-service'
                     }
                 }
-                // Do NOT abort all branches when one test fails
-                failFast false
+                
                 stages {
                     stage('Build JAR') {
                         steps {
