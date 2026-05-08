@@ -8,7 +8,9 @@ pipeline {
         DOCKER_IMAGE_PREFIX   = 'hireconnect'
 
         // ── Versioning ──────────────────────────────────────────────────────────
-        IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+        // BRANCH_NAME is only populated in Multibranch pipelines.
+        // For regular pipeline jobs fall back to GIT_BRANCH, then 'main'.
+        IMAGE_TAG = "${(env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'main').replaceAll('origin/', '')}-${env.BUILD_NUMBER}"
 
         // ── Maven ────────────────────────────────────────────────────────────────
         MAVEN_OPTS = '-XX:+TieredCompilation -XX:TieredStopAtLevel=1'
