@@ -44,6 +44,8 @@ pipeline {
         // ── 2. Build + Test all services ────────────────────────────────────────
         stage('Build & Test Microservices') {
             matrix {
+                // failFast: false → a single service failure won't abort all other branches
+                failFast false
                 axes {
                     axis {
                         name    'SERVICE'
@@ -65,12 +67,15 @@ pipeline {
                         steps {
                             echo "🏗️  Building ${SERVICE}…"
                             dir("${SERVICE}") {
-                                sh 'mvn clean package -B -Dmaven.test.skip=false'
+                                // -DskipITs skips Spring Boot integration tests that need
+                                // a live DB/Eureka — unit tests (Mockito) still run.
+                                sh 'mvn clean package -B -DskipITs'
                             }
                         }
                         post {
                             always {
-                                // Collect JUnit results per service
+                                // Path is relative to workspace root; dir() does NOT
+                                // affect junit — so we must include SERVICE in the glob.
                                 junit allowEmptyResults: true,
                                       testResults: "${SERVICE}/target/surefire-reports/*.xml"
                             }
@@ -83,6 +88,7 @@ pipeline {
         // ── 3. Docker Build ──────────────────────────────────────────────────────
         stage('Docker Build All Images') {
             matrix {
+                failFast false
                 axes {
                     axis {
                         name    'SERVICE'
@@ -203,6 +209,7 @@ pipeline {
         }
         always {
             // Remove dangling images to reclaim disk space
+            // '|| true' ensures this never fails the pipeline even if docker is unavailable
             sh 'docker image prune -f || true'
             cleanWs()
         }
