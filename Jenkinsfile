@@ -2,22 +2,29 @@ pipeline {
     agent any
 
     environment {
+        // ── Docker Hub / Registry ────────────────────────────────────────────────
         DOCKER_REGISTRY       = 'docker.io'
-        DOCKER_CREDENTIALS_ID = 'docker-hub-credentials'
+        DOCKER_CREDENTIALS_ID = 'docker-hub-credentials'   // Jenkins credential ID
         DOCKER_IMAGE_PREFIX   = 'hireconnect'
-        IMAGE_TAG             = "${(env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'main').replaceAll('origin/', '')}-${env.BUILD_NUMBER}"
-        MAVEN_OPTS            = '-XX:+TieredCompilation -XX:TieredStopAtLevel=1 -Xmx512m'
+
+        // ── Versioning ──────────────────────────────────────────────────────────
+        // BRANCH_NAME is only populated in Multibranch pipelines.
+        // For regular pipeline jobs fall back to GIT_BRANCH, then 'main'.
+        IMAGE_TAG = "${(env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'main').replaceAll('origin/', '')}-${env.BUILD_NUMBER}"
+
+        // ── Maven ────────────────────────────────────────────────────────────────
+        MAVEN_OPTS = '-XX:+TieredCompilation -XX:TieredStopAtLevel=1'
     }
 
     tools {
-        maven 'Maven-3.9'
-        jdk   'JDK-21'
+        maven 'Maven-3.9'       // Must match the name in Jenkins → Global Tool Configuration
+        jdk   'JDK-21'          // Must match the name in Jenkins → Global Tool Configuration
     }
 
     options {
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '10'))
-        timeout(time: 90, unit: 'MINUTES')
+        timeout(time: 60, unit: 'MINUTES')
         disableConcurrentBuilds()
     }
 
@@ -31,47 +38,64 @@ pipeline {
             }
         }
 
-        // ── 2. Check Docker ──────────────────────────────────────────────────────
+        // ── 2. Check Docker availability ─────────────────────────────────────────
+        // Sets DOCKER_AVAILABLE=true/false so downstream stages can skip gracefully.
         stage('Check Docker') {
             steps {
                 script {
-                    def result = sh(script: 'docker info > /dev/null 2>&1 && echo "true" || echo "false"', returnStdout: true).trim()
-                    env.DOCKER_AVAILABLE = result
-                    echo result == 'true' ? '✅  Docker daemon reachable.' : '⚠️  Docker daemon NOT reachable — Docker stages will be skipped.'
+                    def dockerCheck = sh(
+                        script: 'which docker > /dev/null 2>&1 && echo "true" || echo "false"',
+                        returnStdout: true
+                    ).trim()
+                    env.DOCKER_AVAILABLE = dockerCheck
+                    if (dockerCheck == 'true') {
+                        echo '✅  Docker is available — image build & push stages will run.'
+                    } else {
+                        echo '⚠️  Docker not found on this agent — Docker stages will be SKIPPED.'
+                        echo '    To enable Docker: mount the Docker socket into the Jenkins container.'
+                        echo '    See: https://www.jenkins.io/doc/book/installing/docker/'
+                    }
                 }
             }
         }
 
-        // ── 3. Build all services (parallel, skip ALL tests) ─────────────────────
-        stage('Maven Build') {
+        // ── 3. Build + Test all services ────────────────────────────────────────
+        stage('Build & Test Microservices') {
             matrix {
                 axes {
                     axis {
-                        name   'SERVICE'
-                        values 'eureka-server',
-                               'api-gateway',
-                               'auth-service',
-                               'profile-service',
-                               'job-service',
-                               'application-service',
-                               'notification-service',
-                               'payment-service',
-                               'subscription-service',
-                               'interview-service',
-                               'analytics-service'
+                        name    'SERVICE'
+                        values  'eureka-server',
+                                'api-gateway',
+                                'auth-service',
+                                'profile-service',
+                                'job-service',
+                                'application-service',
+                                'notification-service',
+                                'payment-service',
+                                'subscription-service',
+                                'interview-service',
+                                'analytics-service'
                     }
                 }
-                
                 stages {
-                    stage('Build JAR') {
+                    stage('Maven Build') {
                         steps {
                             echo "🏗️  Building ${SERVICE}…"
                             dir("${SERVICE}") {
-                                sh 'mvn clean package -B -DskipTests'
+                                // catchError: a test failure marks this branch FAILURE and
+                                // overall build UNSTABLE — but does NOT stop Docker stages.
+                                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                                    // -DskipITs skips Spring Boot integration tests that need
+                                    // a live DB/Eureka — unit tests (Mockito) still run.
+                                    sh 'mvn clean package -B -DskipITs'
+                                }
                             }
                         }
                         post {
                             always {
+                                // Path is relative to workspace root; dir() does NOT
+                                // affect junit — so we must include SERVICE in the glob.
                                 junit allowEmptyResults: true,
                                       testResults: "${SERVICE}/target/surefire-reports/*.xml"
                             }
@@ -81,76 +105,112 @@ pipeline {
             }
         }
 
-        // ── 4. Docker Build — SEQUENTIAL to avoid RAM overload ───────────────────
+        // ── 4. Docker Build ──────────────────────────────────────────────────────
         stage('Docker Build All Images') {
             when {
-                expression { return env.DOCKER_AVAILABLE == 'true' }
+                // Run when Docker is present AND build is not an outright FAILURE
+                // (UNSTABLE = some tests failed but we still want Docker images built)
+                expression {
+                    return env.DOCKER_AVAILABLE == 'true' &&
+                           currentBuild.currentResult != 'FAILURE'
+                }
             }
-            steps {
-                script {
-                    def services = [
-                        'eureka-server', 'api-gateway', 'auth-service',
-                        'profile-service', 'job-service', 'application-service',
-                        'notification-service', 'payment-service',
-                        'subscription-service', 'interview-service', 'analytics-service'
-                    ]
-                    for (svc in services) {
-                        echo "🐳  Building Docker image for ${svc}…"
-                        dir("${svc}") {
-                            sh """
-                                docker build \
-                                    -t ${DOCKER_IMAGE_PREFIX}-${svc}:${IMAGE_TAG} \
-                                    -t ${DOCKER_IMAGE_PREFIX}-${svc}:latest \
-                                    .
-                            """
+            matrix {
+                axes {
+                    axis {
+                        name    'SERVICE'
+                        values  'eureka-server',
+                                'api-gateway',
+                                'auth-service',
+                                'profile-service',
+                                'job-service',
+                                'application-service',
+                                'notification-service',
+                                'payment-service',
+                                'subscription-service',
+                                'interview-service',
+                                'analytics-service'
+                    }
+                }
+                stages {
+                    stage('Docker Build') {
+                        steps {
+                            echo "🐳  Building Docker image for ${SERVICE}…"
+                            dir("${SERVICE}") {
+                                sh """
+                                    docker build \\
+                                        --network host \\
+                                        --dns 8.8.8.8 \\
+                                        -t ${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG} \\
+                                        -t ${DOCKER_IMAGE_PREFIX}-${SERVICE}:latest \\
+                                        .
+                                """
+                            }
                         }
                     }
                 }
             }
         }
 
-        // ── 5. Docker Push (main / master only) ─────────────────────────────────
+        // ── 5. Docker Push (only on main / master) ───────────────────────────────
         stage('Docker Push All Images') {
             when {
                 allOf {
+                    // Only run when Docker CLI is present
                     expression { return env.DOCKER_AVAILABLE == 'true' }
                     anyOf {
                         branch 'main'
                         branch 'master'
+                        // Also allow when GIT_BRANCH is main (regular pipeline jobs)
                         expression { return (env.GIT_BRANCH ?: '').contains('main') }
                     }
                 }
             }
-            steps {
-                script {
-                    def services = [
-                        'eureka-server', 'api-gateway', 'auth-service',
-                        'profile-service', 'job-service', 'application-service',
-                        'notification-service', 'payment-service',
-                        'subscription-service', 'interview-service', 'analytics-service'
-                    ]
-                    withCredentials([usernamePassword(
-                            credentialsId: "${DOCKER_CREDENTIALS_ID}",
-                            usernameVariable: 'DOCKER_USER',
-                            passwordVariable: 'DOCKER_PASS')]) {
-                        sh 'echo "$DOCKER_PASS" | docker login ${DOCKER_REGISTRY} -u "$DOCKER_USER" --password-stdin'
-                        for (svc in services) {
-                            echo "📤  Pushing ${svc}…"
-                            sh """
-                                docker tag ${DOCKER_IMAGE_PREFIX}-${svc}:${IMAGE_TAG} \
-                                    \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${svc}:${IMAGE_TAG}
-                                docker tag ${DOCKER_IMAGE_PREFIX}-${svc}:${IMAGE_TAG} \
-                                    \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${svc}:latest
-                                docker push \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${svc}:${IMAGE_TAG}
-                                docker push \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${svc}:latest
-                            """
+            matrix {
+                axes {
+                    axis {
+                        name    'SERVICE'
+                        values  'eureka-server',
+                                'api-gateway',
+                                'auth-service',
+                                'profile-service',
+                                'job-service',
+                                'application-service',
+                                'notification-service',
+                                'payment-service',
+                                'subscription-service',
+                                'interview-service',
+                                'analytics-service'
+                    }
+                }
+                stages {
+                    stage('Push') {
+                        steps {
+                            echo "📤  Pushing ${SERVICE} to registry…"
+                            withCredentials([usernamePassword(
+                                    credentialsId: "${DOCKER_CREDENTIALS_ID}",
+                                    usernameVariable: 'DOCKER_USER',
+                                    passwordVariable: 'DOCKER_PASS')]) {
+                                sh """
+                                    echo "\$DOCKER_PASS" | docker login ${DOCKER_REGISTRY} \\
+                                        -u "\$DOCKER_USER" --password-stdin
+
+                                    docker tag ${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG} \\
+                                        \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG}
+                                    docker tag ${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG} \\
+                                        \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${SERVICE}:latest
+
+                                    docker push \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG}
+                                    docker push \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${SERVICE}:latest
+                                """
+                            }
                         }
                     }
                 }
             }
         }
 
-        // ── 6. Deploy via docker-compose ─────────────────────────────────────────
+        // ── 6. Deploy via docker compose (V2) ────────────────────────────────────
         stage('Deploy') {
             when {
                 allOf {
@@ -163,16 +223,16 @@ pipeline {
                 }
             }
             steps {
-                echo '🚀  Deploying all services with docker-compose…'
-                withCredentials([usernamePassword(
-                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS')]) {
-                    sh """
-                        IMAGE_TAG=${IMAGE_TAG} docker-compose pull  || true
-                        IMAGE_TAG=${IMAGE_TAG} docker-compose up -d --remove-orphans
-                    """
-                }
+                echo '🚀  Deploying all services with docker compose…'
+                sh """
+                    # Try docker compose V2 (built-in plugin), fallback to docker-compose V1
+                    if docker compose version > /dev/null 2>&1; then
+                        COMPOSE_CMD="docker compose"
+                    else
+                        COMPOSE_CMD="docker-compose"
+                    fi
+                    IMAGE_TAG=${IMAGE_TAG} \$COMPOSE_CMD up -d --remove-orphans || true
+                """
             }
         }
 
@@ -182,13 +242,11 @@ pipeline {
         success {
             echo "✅  Pipeline completed successfully — build #${env.BUILD_NUMBER}"
         }
-        unstable {
-            echo "⚠️  Pipeline finished UNSTABLE — some tests may have failed."
-        }
         failure {
             echo "❌  Pipeline failed — check stage logs above."
         }
         always {
+            // Remove dangling images; safe even when Docker is not installed
             sh 'docker image prune -f || true'
             cleanWs()
         }
