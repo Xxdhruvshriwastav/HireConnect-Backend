@@ -83,9 +83,13 @@ pipeline {
                         steps {
                             echo "🏗️  Building ${SERVICE}…"
                             dir("${SERVICE}") {
-                                // -DskipITs skips Spring Boot integration tests that need
-                                // a live DB/Eureka — unit tests (Mockito) still run.
-                                sh 'mvn clean package -B -DskipITs'
+                                // catchError: a test failure marks this branch FAILURE and
+                                // overall build UNSTABLE — but does NOT stop Docker stages.
+                                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                                    // -DskipITs skips Spring Boot integration tests that need
+                                    // a live DB/Eureka — unit tests (Mockito) still run.
+                                    sh 'mvn clean package -B -DskipITs'
+                                }
                             }
                         }
                         post {
@@ -104,8 +108,12 @@ pipeline {
         // ── 4. Docker Build ──────────────────────────────────────────────────────
         stage('Docker Build All Images') {
             when {
-                // Only run when Docker CLI is present on the agent
-                expression { return env.DOCKER_AVAILABLE == 'true' }
+                // Run when Docker is present AND build is not an outright FAILURE
+                // (UNSTABLE = some tests failed but we still want Docker images built)
+                expression {
+                    return env.DOCKER_AVAILABLE == 'true' &&
+                           currentBuild.currentResult != 'FAILURE'
+                }
             }
             matrix {
                 axes {

@@ -92,7 +92,7 @@ class SubscriptionServiceImplTest {
         verify(subscriptionRepository, times(1)).save(any());
         verify(invoiceRepository, times(1)).save(any());
 
-        // IMPORTANT → 2 notifications (email + in-app)
+        // 2 notifications: email + in-app
         verify(notificationServiceClient, times(2))
                 .sendNotification(any(NotificationDTO.class));
     }
@@ -118,14 +118,17 @@ class SubscriptionServiceImplTest {
         when(invoiceRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
+        // Return null user → notification block is skipped (guarded by null check in impl)
         when(authServiceClient.getUserById(1))
-                .thenReturn(null); // skip notification
+                .thenReturn(null);
 
         SubscriptionResponse response = subscriptionService.subscribe(request);
 
         assertNotNull(response);
 
         verify(subscriptionRepository, atLeast(2)).save(any());
+        // No notifications when user is null
+        verify(notificationServiceClient, never()).sendNotification(any());
     }
 
     // =========================
