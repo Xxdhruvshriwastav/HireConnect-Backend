@@ -88,8 +88,10 @@ pipeline {
                                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                                     // -DskipITs skips Spring Boot integration tests that need
                                     // a live DB/Eureka — unit tests (Mockito) still run.
-                                    def extraArgs = (env.SERVICE == 'eureka-server') ? '' : '-Deureka.client.enabled=false'
-                                    sh "mvn clean package -B -DskipITs ${extraArgs}"
+                                    script {
+                                        def extraArgs = (env.SERVICE == 'eureka-server') ? '' : '-Deureka.client.enabled=false'
+                                        sh "mvn clean package -B -DskipITs ${extraArgs}"
+                                    }
                                 }
                             }
                         }
