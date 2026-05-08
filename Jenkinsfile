@@ -138,9 +138,8 @@ pipeline {
                             echo "🐳  Building Docker image for ${SERVICE}…"
                             dir("${SERVICE}") {
                                 sh """
-                                    docker build \\
+                                    DOCKER_BUILDKIT=0 docker build \\
                                         --network host \\
-                                        --dns 8.8.8.8 \\
                                         -t ${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG} \\
                                         -t ${DOCKER_IMAGE_PREFIX}-${SERVICE}:latest \\
                                         .
