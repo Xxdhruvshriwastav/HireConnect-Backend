@@ -28,11 +28,6 @@ pipeline {
         disableConcurrentBuilds()
     }
 
-    // ── List of microservices to build ──────────────────────────────────────────
-    // Each entry must match the directory name under the repo root.
-    // Update this list whenever you add / remove a service.
-    // ────────────────────────────────────────────────────────────────────────────
-
     stages {
 
         // ── 1. Checkout ──────────────────────────────────────────────────────────
@@ -43,7 +38,28 @@ pipeline {
             }
         }
 
-        // ── 2. Build + Test all services ────────────────────────────────────────
+        // ── 2. Check Docker availability ─────────────────────────────────────────
+        // Sets DOCKER_AVAILABLE=true/false so downstream stages can skip gracefully.
+        stage('Check Docker') {
+            steps {
+                script {
+                    def dockerCheck = sh(
+                        script: 'which docker > /dev/null 2>&1 && echo "true" || echo "false"',
+                        returnStdout: true
+                    ).trim()
+                    env.DOCKER_AVAILABLE = dockerCheck
+                    if (dockerCheck == 'true') {
+                        echo '✅  Docker is available — image build & push stages will run.'
+                    } else {
+                        echo '⚠️  Docker not found on this agent — Docker stages will be SKIPPED.'
+                        echo '    To enable Docker: mount the Docker socket into the Jenkins container.'
+                        echo '    See: https://www.jenkins.io/doc/book/installing/docker/'
+                    }
+                }
+            }
+        }
+
+        // ── 3. Build + Test all services ────────────────────────────────────────
         stage('Build & Test Microservices') {
             matrix {
                 axes {
@@ -85,8 +101,12 @@ pipeline {
             }
         }
 
-        // ── 3. Docker Build ──────────────────────────────────────────────────────
+        // ── 4. Docker Build ──────────────────────────────────────────────────────
         stage('Docker Build All Images') {
+            when {
+                // Only run when Docker CLI is present on the agent
+                expression { return env.DOCKER_AVAILABLE == 'true' }
+            }
             matrix {
                 axes {
                     axis {
@@ -122,12 +142,18 @@ pipeline {
             }
         }
 
-        // ── 4. Docker Push (only on main / master) ───────────────────────────────
+        // ── 5. Docker Push (only on main / master) ───────────────────────────────
         stage('Docker Push All Images') {
             when {
-                anyOf {
-                    branch 'main'
-                    branch 'master'
+                allOf {
+                    // Only run when Docker CLI is present
+                    expression { return env.DOCKER_AVAILABLE == 'true' }
+                    anyOf {
+                        branch 'main'
+                        branch 'master'
+                        // Also allow when GIT_BRANCH is main (regular pipeline jobs)
+                        expression { return (env.GIT_BRANCH ?: '').contains('main') }
+                    }
                 }
             }
             matrix {
@@ -174,12 +200,16 @@ pipeline {
             }
         }
 
-        // ── 5. Deploy via docker-compose (main / master only) ────────────────────
+        // ── 6. Deploy via docker-compose (main / master only) ────────────────────
         stage('Deploy') {
             when {
-                anyOf {
-                    branch 'main'
-                    branch 'master'
+                allOf {
+                    expression { return env.DOCKER_AVAILABLE == 'true' }
+                    anyOf {
+                        branch 'main'
+                        branch 'master'
+                        expression { return (env.GIT_BRANCH ?: '').contains('main') }
+                    }
                 }
             }
             steps {
@@ -189,7 +219,6 @@ pipeline {
                         usernameVariable: 'DOCKER_USER',
                         passwordVariable: 'DOCKER_PASS')]) {
                     sh """
-                        # Pull the freshly-built images and recreate containers
                         IMAGE_TAG=${IMAGE_TAG} docker-compose pull  || true
                         IMAGE_TAG=${IMAGE_TAG} docker-compose up -d --remove-orphans
                     """
@@ -201,14 +230,13 @@ pipeline {
 
     post {
         success {
-            echo "✅  All microservices built & deployed successfully — build #${env.BUILD_NUMBER}"
+            echo "✅  Pipeline completed successfully — build #${env.BUILD_NUMBER}"
         }
         failure {
             echo "❌  Pipeline failed — check stage logs above."
         }
         always {
-            // Remove dangling images to reclaim disk space
-            // '|| true' ensures this never fails the pipeline even if docker is unavailable
+            // Remove dangling images; safe even when Docker is not installed
             sh 'docker image prune -f || true'
             cleanWs()
         }
