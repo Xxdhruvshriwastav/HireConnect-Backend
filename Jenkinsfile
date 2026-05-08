@@ -139,6 +139,8 @@ pipeline {
                             dir("${SERVICE}") {
                                 sh """
                                     docker build \\
+                                        --network host \\
+                                        --dns 8.8.8.8 \\
                                         -t ${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG} \\
                                         -t ${DOCKER_IMAGE_PREFIX}-${SERVICE}:latest \\
                                         .
