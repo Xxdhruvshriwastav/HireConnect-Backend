@@ -165,46 +165,29 @@ pipeline {
                     }
                 }
             }
-            matrix {
-                axes {
-                    axis {
-                        name    'SERVICE'
-                        values  'eureka-server',
-                                'api-gateway',
-                                'auth-service',
-                                'profile-service',
-                                'job-service',
-                                'application-service',
-                                'notification-service',
-                                'payment-service',
-                                'subscription-service',
-                                'interview-service',
-                                'analytics-service'
-                    }
-                }
-                stages {
-                    stage('Push') {
-                        steps {
-                            echo "📤  Pushing ${SERVICE} to registry…"
-                            withCredentials([usernamePassword(
-                                    credentialsId: "${DOCKER_CREDENTIALS_ID}",
-                                    usernameVariable: 'DOCKER_USER',
-                                    passwordVariable: 'DOCKER_PASS')]) {
-                                sh """
-                                    echo "\$DOCKER_PASS" | docker login ${DOCKER_REGISTRY} \\
-                                        -u "\$DOCKER_USER" --password-stdin
+            steps {
+                echo "📤  Pushing images to registry sequentially to avoid proxy overload…"
+                withCredentials([usernamePassword(
+                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS')]) {
+                    sh """
+                        echo "\$DOCKER_PASS" | docker login ${DOCKER_REGISTRY} \\
+                            -u "\$DOCKER_USER" --password-stdin
+                        
+                        SERVICES="eureka-server api-gateway auth-service profile-service job-service application-service notification-service payment-service subscription-service interview-service analytics-service"
+                        
+                        for SERVICE in \$SERVICES; do
+                            echo "==> Pushing \$SERVICE..."
+                            docker tag ${DOCKER_IMAGE_PREFIX}-\$SERVICE:${IMAGE_TAG} \\
+                                \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-\$SERVICE:${IMAGE_TAG}
+                            docker tag ${DOCKER_IMAGE_PREFIX}-\$SERVICE:${IMAGE_TAG} \\
+                                \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-\$SERVICE:latest
 
-                                    docker tag ${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG} \\
-                                        \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG}
-                                    docker tag ${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG} \\
-                                        \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${SERVICE}:latest
-
-                                    docker push \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${SERVICE}:${IMAGE_TAG}
-                                    docker push \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-${SERVICE}:latest
-                                """
-                            }
-                        }
-                    }
+                            docker push \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-\$SERVICE:${IMAGE_TAG}
+                            docker push \$DOCKER_USER/${DOCKER_IMAGE_PREFIX}-\$SERVICE:latest
+                        done
+                    """
                 }
             }
         }
